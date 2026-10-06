@@ -1,0 +1,116 @@
+#!/bin/bash
+# Managed by bu_rcs.coldfront -- do not edit.
+#
+# Initialise a blank {{ cf_instance }} ColdFront instance. Run by hand after
+# the first deploy; not called by Ansible.
+#
+#   {{ cf_dir }}/bin/init.sh [--force] [--test-data]
+#
+# Refuses to run on an already-initialised instance unless --force is given.
+#
+# Why that guard matters: `initial_setup` is NOT idempotent, despite the
+# get_or_create calls inside it. Three of the commands it runs begin by wiping
+# their tables --
+#     FieldOfScience.objects.all().delete()      (import_field_of_science_data)
+#     GrantFundingAgency.objects.all().delete()  (add_default_grant_options)
+#     PublicationSource.objects.all().delete()   (add_default_publication_sources)
+# -- so any site-added values are destroyed. A fourth, add_scheduled_tasks,
+# calls schedule() with no uniqueness check, so re-running duplicates the daily
+# jobs and send_expiry_emails starts firing twice a day.
+#
+#   --force       run initial_setup even on an initialised instance
+#   --test-data   also load ColdFront's sample data (DEV ONLY -- creates
+#                 accounts with known insecure passwords)
+
+set -euo pipefail
+
+APP_CTR="{{ cf_app_name }}"
+SU_NAME="{{ cf_superuser | default('cfadmin') }}"
+SU_EMAIL="{{ cf_superuser_email | default('root@localhost') }}"
+SU_SECRET="/run/secrets/{{ cf_instance }}_cf_superuser_password"
+
+FORCE=no
+TEST_DATA=no
+for arg in "$@"; do
+    case "$arg" in
+        --force)     FORCE=yes ;;
+        --test-data) TEST_DATA=yes ;;
+        *) echo "init.sh: unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+die() { echo "init.sh: $*" >&2; exit 1; }
+say() { echo "init.sh: $*"; }
+cf()  { podman exec "$APP_CTR" coldfront "$@"; }
+
+command -v podman >/dev/null || die "podman not found"
+podman container exists "$APP_CTR" || die "container $APP_CTR does not exist"
+
+# --- is this instance already initialised? ---------------------------------
+# showmigrations reports every migration as unapplied when the schema is
+# absent, and does not error on a missing django_migrations table. An applied
+# marker means the database has been set up before -- including a restored one.
+if cf showmigrations --plan 2>/dev/null | grep -q '^\[X\]'; then
+    INITIALISED=yes
+else
+    INITIALISED=no
+fi
+
+if [ "$INITIALISED" = yes ] && [ "$FORCE" = no ]; then
+    say "instance {{ cf_instance }} is already initialised -- nothing to do"
+    say "(--force re-runs initial_setup; this DESTROYS site-added fields of"
+    say " science, funding agencies and publication sources, and duplicates"
+    say " the scheduled tasks)"
+    exit 0
+fi
+
+if [ "$INITIALISED" = yes ]; then
+    say "WARNING re-running initial_setup on an INITIALISED instance"
+    say "WARNING back up first: {{ cf_dir }}/bin/backup.sh"
+    printf 'init.sh: type the instance name to continue: '
+    read -r reply
+    [ "$reply" = "{{ cf_instance }}" ] || die "aborted"
+fi
+
+# --- initial setup ---------------------------------------------------------
+# --force_overwrite suppresses the interactive prompt. Without it the command
+# calls input(), and `podman exec` without -i gives it EOF.
+say "running initial_setup"
+cf initial_setup --force_overwrite
+
+# --- superuser -------------------------------------------------------------
+# Check first rather than interpreting createsuperuser's error text, which is
+# not a stable interface across Django versions.
+if cf shell --no-imports -c \
+      "from django.contrib.auth import get_user_model as g; \
+       print(g().objects.filter(username='${SU_NAME}').exists())" \
+      | grep -q True; then
+    say "superuser ${SU_NAME} already exists"
+else
+    say "creating superuser ${SU_NAME}"
+    # Password is read inside the container so it never reaches host argv.
+    podman exec "$APP_CTR" sh -c \
+        "DJANGO_SUPERUSER_PASSWORD=\$(cat ${SU_SECRET}) \
+         coldfront createsuperuser --noinput \
+           --username '${SU_NAME}' --email '${SU_EMAIL}'"
+    say "password: podman secret inspect --showsecret {{ cf_instance }}_cf_superuser_password"
+fi
+
+# --- static ----------------------------------------------------------------
+# Also needs running after any image change, since a new image ships new
+# bundles and a new Vite manifest. Harmless to repeat.
+say "collecting static files"
+cf collectstatic --noinput
+
+# --- optional sample data --------------------------------------------------
+if [ "$TEST_DATA" = yes ]; then
+    say "WARNING loading test data -- creates accounts with known passwords"
+    say "WARNING never do this on an instance reachable by real users"
+    printf 'init.sh: type LOADTESTDATA to continue: '
+    read -r reply
+    [ "$reply" = "LOADTESTDATA" ] || die "aborted"
+    cf load_test_data
+fi
+
+say "done"
+say "next: confirm the queue runs -- systemctl status {{ cf_workers_name }}"

@@ -1,0 +1,35 @@
+---
+- name: Restart Coldfront webserver
+  ansible.builtin.systemd:
+    name: "{{ cf_web_name }}"
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Restart Coldfront database
+  ansible.builtin.systemd:
+    name: "{{ cf_db_name }}"
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Restart Coldfront server
+  ansible.builtin.systemd:
+    name: "{{ cf_app_name }}"
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Restart Coldfront worker
+  ansible.builtin.systemd:
+    name: "{{ cf_workers_name }}"
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Restart Coldfront redis
+  ansible.builtin.systemd:
+    name: "{{ cf_redis_name }}"
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode
