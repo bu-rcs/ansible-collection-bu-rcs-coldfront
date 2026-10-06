@@ -1,0 +1,69 @@
+with open("/run/secrets/cf_db_password", "r") as file:
+    cf_db_password = file.read().strip()
+
+with open("/run/secrets/cf_secret_key", "r") as file:
+    SECRET_KEY = file.read().strip()
+
+with open("/run/secrets/cf_redis_password") as file:
+    cf_redis_password = file.read().strip()
+
+CENTER_NAME = "{{ cf_site_name }}"
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': '{{ cf_db_dbname }}',
+        'USER': '{{ cf_db_user }}',
+        'HOST': '{{ cf_db_host }}',
+        'PORT': '{{ cf_db_port | default("5432") }}',
+        'PASSWORD': cf_db_password
+    }
+}
+
+Q_CLUSTER = {
+    **Q_CLUSTER,
+    "workers": {{ cf_q_workers | default(2) }},
+    "redis": {
+        "host": "{{ cf_redis_host }}",
+        "port": {{ cf_redis_port | default(6379, true) | int }},
+        "db": 0,
+        "password": cf_redis_password,
+    },
+}
+
+{% set bp = cf_base_path | default('', true) | trim('/') %}
+SESSION_COOKIE_PATH = "{{ '/' ~ bp if bp else '/' }}"
+CSRF_COOKIE_PATH = "{{ '/' ~ bp if bp else '/' }}"
+
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
+CSRF_TRUSTED_ORIGINS = ["https://{{ cf_public_host }}"]
+{% if cf_remote_user_header | default('', true) | length > 0 %}
+
+# REMOTE_USER authentication. Apache authenticates and passes the identity in
+# {{ cf_remote_user_header }}; see cf_remote_user.py.
+#
+# RemoteUserMiddleware must come after AuthenticationMiddleware, which sits at
+# index 4 of ColdFront's MIDDLEWARE, so appending is safe.
+MIDDLEWARE = [*MIDDLEWARE, "cf_remote_user.ShibRemoteUserMiddleware"]
+ 
+# Listed first so remote auth is tried before ModelBackend. ModelBackend stays
+# so the local superuser can still reach /admin.
+AUTHENTICATION_BACKENDS = [
+    "cf_remote_user.ShibRemoteUserBackend",
+    *AUTHENTICATION_BACKENDS,
+]
+ 
+# Django's logout clears its own session but not Apache's SP session, so
+# without this the next request silently re-authenticates and the user appears
+# never to log out.
+LOGOUT_REDIRECT_URL = "{{ cf_remote_logout_url }}"
+{% endif %}
+{% if cf_env_label | default('', true) | length > 0 %}
+CF_ENV_LABEL = "{{ cf_env_label }}"
+CF_ENV_COLOR = "{{ cf_env_color | default('#b30000', true) }}"
+{% else %}
+CF_ENV_LABEL = ""
+CF_ENV_COLOR = ""
+{% endif %}
+SETTINGS_EXPORT = [*SETTINGS_EXPORT, "CF_ENV_LABEL", "CF_ENV_COLOR"]

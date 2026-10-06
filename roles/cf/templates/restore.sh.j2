@@ -1,0 +1,87 @@
+#!/bin/bash
+# Managed by bu_rcs.coldfront -- do not edit.
+#
+# Restore a ColdFront database dump into {{ cf_instance }}.
+#
+#   {{ cf_dir }}/bin/restore.sh <dump-file> --yes
+#
+# THIS DESTROYS THE CURRENT DATABASE. --yes is required; there is no prompt
+# fallback so it cannot be run accidentally from a script.
+#
+# Restoring into a freshly deployed instance works even though its database
+# password was newly generated: initdb set that password, and pg_restore only
+# loads objects. What does NOT work is copying /srv/*-cf-pgsql/data between
+# instances -- that carries the old password expectation with it. Always use
+# dump/restore, never a directory copy.
+#
+# A dump restores safely only into the same ColdFront version or newer. The
+# version is in the dump filename; this script warns on a mismatch but does not
+# refuse, since forward restores are legitimate (restore old data, then migrate).
+
+set -euo pipefail
+
+DB_CTR="{{ cf_db_name }}"
+DB_USER="{{ cf_db_user }}"
+DB_NAME="{{ cf_db_dbname }}"
+DB_SECRET="/run/secrets/{{ cf_instance }}_cf_db_password"
+VERSION="{{ cf_image_tag | default('unknown') }}"
+APP_UNIT="{{ cf_app_name }}.service"
+WORKER_UNIT="{{ cf_workers_name }}.service"
+
+die() { echo "restore.sh: $*" >&2; exit 1; }
+
+DUMP="${1:-}"
+CONFIRM="${2:-}"
+
+[ -n "$DUMP" ] || die "usage: restore.sh <dump-file> --yes"
+[ -f "$DUMP" ] || die "no such file: $DUMP"
+[ "$CONFIRM" = "--yes" ] || die "refusing to destroy {{ cf_instance }} without --yes"
+
+command -v podman >/dev/null || die "podman not found"
+podman container exists "$DB_CTR" || die "container $DB_CTR does not exist"
+
+# Validate before touching anything. A bad dump should fail here, while the
+# current database is still intact and the services are still up.
+podman exec -i "$DB_CTR" pg_restore --list < "$DUMP" > /dev/null 2>&1 \
+    || die "$DUMP is not a valid pg_dump custom-format archive"
+
+# Version check is advisory. Restoring an older dump then migrating is a valid
+# recovery path; restoring a NEWER dump into older code is not.
+DUMP_VERSION="$(basename "$DUMP" .dump | awk -F- '{print $NF}')"
+if [ "$DUMP_VERSION" != "$VERSION" ]; then
+    echo "restore.sh: WARNING dump version '${DUMP_VERSION}' != deployed version '${VERSION}'"
+    echo "restore.sh:         restoring older data is fine (run migrate afterwards)."
+    echo "restore.sh:         restoring NEWER data into older code will not work."
+fi
+
+echo "restore.sh: stopping ${WORKER_UNIT} and ${APP_UNIT}"
+# Both must be down: open connections block DROP, and a worker running against
+# a half-restored database can write bad data.
+systemctl stop "$WORKER_UNIT" "$APP_UNIT"
+
+restart_services() {
+    echo "restore.sh: starting ${APP_UNIT} and ${WORKER_UNIT}"
+    systemctl start "$APP_UNIT" "$WORKER_UNIT"
+}
+trap restart_services EXIT
+
+echo "restore.sh: restoring ${DUMP} into ${DB_NAME}"
+
+# --single-transaction makes this atomic: on failure the existing database is
+#   left untouched rather than half-replaced.
+# --clean --if-exists drops existing objects first.
+# --no-owner because role names may differ between instances.
+# --exit-on-error is implied by --single-transaction.
+if podman exec -i "$DB_CTR" sh -c \
+      "PGPASSWORD=\$(cat ${DB_SECRET}) pg_restore \
+         -U '${DB_USER}' -d '${DB_NAME}' \
+         --clean --if-exists --no-owner --single-transaction" \
+      < "$DUMP"; then
+    echo "restore.sh: restore completed"
+else
+    die "restore FAILED -- database was rolled back and is unchanged"
+fi
+
+echo "restore.sh: reminder -- run migrations if the dump predates this version:"
+echo "  podman exec {{ cf_app_name }} coldfront showmigrations --plan | grep '\[ \]'"
+echo "  podman exec {{ cf_app_name }} coldfront migrate"

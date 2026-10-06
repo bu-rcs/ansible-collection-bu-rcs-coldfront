@@ -1,0 +1,13 @@
+namespace: bu_rcs
+name: coldfront
+version: 0.1.0
+readme: README.md
+authors:
+  - augustin@bu.edu
+description: >-
+  Ansible roles to set up a Coldfront stack
+license:
+  - MIT
+dependencies:
+  community.general: "*"
+  containers.podman: "*"
