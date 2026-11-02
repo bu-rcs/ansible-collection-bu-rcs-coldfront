@@ -67,3 +67,8 @@ CF_ENV_LABEL = ""
 CF_ENV_COLOR = ""
 {% endif %}
 SETTINGS_EXPORT = [*SETTINGS_EXPORT, "CF_ENV_LABEL", "CF_ENV_COLOR"]
+{% if cf_settings_extra | default('', true) | trim | length > 0 %}
+
+# --- cf_settings_extra, from inventory ---------------------------------------
+{{ cf_settings_extra }}
+{% endif %}
