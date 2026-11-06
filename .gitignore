@@ -1,0 +1,5 @@
+*.swp
+*.tar.gz
+*.retry
+__pycache__/
+.venv/

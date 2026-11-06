@@ -1,0 +1,49 @@
+---
+- name: Create Coldfront Redis to level directories
+  ansible.builtin.file:
+    path: "{{ cf_redis_dir }}/{{ item.dir }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - { dir: "" }
+    - { dir: 'data', owner: '999', group: '999', mode: '0750' }
+
+- name: Install Redis start script
+  ansible.builtin.template:
+    src: redis-start.sh.j2
+    dest: "{{ cf_redis_dir }}/redis-start.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  notify: Restart Coldfront redis
+
+- name: Create Coldfront Redis container
+  containers.podman.podman_container:
+    name: "{{ cf_redis_name }}"
+    image: "{{ cf_redis_image }}"
+    network: "{{ cf_network }}"
+    timezone: "{{ cf_timezone }}"
+    command: /usr/local/bin/redis-start.sh
+    secrets:
+      - "{{ cf_instance }}_cf_redis_password\
+         ,type=mount,target=/run/secrets/cf_redis_password"
+    volumes:
+      - "{{ cf_redis_dir }}/data:/data:rw,Z"
+      - "{{ cf_redis_dir }}/redis-start.sh:/usr/local/bin/redis-start.sh:ro,Z"
+    state: quadlet
+    quadlet_filename: "{{ cf_redis_name }}"
+    quadlet_options:
+      - |
+        [Install]
+        WantedBy=default.target
+  notify: Restart Coldfront redis
+
+- name: Enable Coldfront Redis systemd service
+  ansible.builtin.systemd:
+    name: "{{ cf_redis_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: not ansible_check_mode

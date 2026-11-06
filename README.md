@@ -1,1 +1,1 @@
-# ansible-collection-bu-rcs-coldfront
+# bu_rcs.coldfront

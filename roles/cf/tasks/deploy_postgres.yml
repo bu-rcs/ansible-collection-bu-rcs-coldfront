@@ -1,0 +1,47 @@
+---
+- name: Create Coldfront Postgres to level directories
+  ansible.builtin.file:
+    path: "{{ cf_db_dir }}/{{ item.dir }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - { dir: "" }
+    - { dir: 'data', owner: '999', group: '999', mode: '0700' }
+
+- name: Install Coldfront Postgres env file
+  ansible.builtin.template:
+    src: "pg.env.j2"
+    dest: "{{ cf_db_dir }}/pg.env"
+    owner: 'root'
+    group: 'root'
+    mode: '0600'
+  notify: Restart Coldfront database
+
+- name: Create Coldfront Postgres container
+  containers.podman.podman_container:
+    name: "{{ cf_db_name }}"
+    image: "{{ cf_db_image }}"
+    network: "{{ cf_network }}"
+    timezone: "{{ cf_timezone }}"
+    env_file: "{{ cf_db_dir }}/pg.env"
+    secrets:
+      - "{{ cf_instance }}_cf_db_password"
+    volumes:
+      - "{{ cf_db_dir }}/data:/var/lib/postgresql/data:rw,Z"
+    state: quadlet
+    quadlet_filename: "{{ cf_db_name }}"
+    quadlet_options:
+      - |
+        [Install]
+        WantedBy=default.target
+  notify: Restart Coldfront database
+
+- name: Enable Coldfront database systemd service
+  ansible.builtin.systemd:
+    name: "{{ cf_db_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: not ansible_check_mode

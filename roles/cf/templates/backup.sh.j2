@@ -1,0 +1,65 @@
+#!/bin/bash
+# Managed by bu_rcs.coldfront -- do not edit.
+#
+# Dump the {{ cf_instance }} ColdFront database.
+#
+#   {{ cf_dir }}/bin/backup.sh [output-directory]
+#
+# Dumps travel over stdout from `podman exec`, so no backup volume is mounted
+# into the database container and the password never leaves it. Output is
+# pg_dump custom format (-Fc), which allows selective and parallel restore and
+# can be validated without loading it.
+#
+# The image tag is recorded in the filename: a dump only restores safely into
+# the same schema version or newer, so the version needs to travel with it.
+
+set -euo pipefail
+
+DB_CTR="{{ cf_db_name }}"
+DB_USER="{{ cf_db_user }}"
+DB_NAME="{{ cf_db_dbname }}"
+DB_SECRET="/run/secrets/{{ cf_instance }}_cf_db_password"
+VERSION="{{ cf_image_tag | default('unknown') }}"
+BACKUP_DIR="${1:-{{ cf_dir }}/backups}"
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="${BACKUP_DIR}/{{ cf_instance }}-${STAMP}-${VERSION}.dump"
+
+die() { echo "backup.sh: $*" >&2; exit 1; }
+
+command -v podman >/dev/null || die "podman not found"
+podman container exists "$DB_CTR" || die "container $DB_CTR does not exist"
+[ "$(podman container inspect -f '{% raw %}{{.State.Running}}{% endraw %}' "$DB_CTR")" = "true" ] \
+    || die "container $DB_CTR is not running"
+
+mkdir -p "$BACKUP_DIR"
+umask 077
+
+echo "backup.sh: dumping ${DB_NAME} from ${DB_CTR} (version ${VERSION})"
+
+# Password is read inside the container so it never appears in host argv.
+# Write to a temp file first: a failed dump must not replace a good one, and
+# an interrupted dump must not be mistaken for a complete backup.
+TMP="${OUT}.partial"
+trap 'rm -f "$TMP"' EXIT
+
+if ! podman exec "$DB_CTR" sh -c \
+        "PGPASSWORD=\$(cat ${DB_SECRET}) pg_dump -U '${DB_USER}' -d '${DB_NAME}' -Fc" \
+        > "$TMP"; then
+    die "pg_dump failed"
+fi
+
+[ -s "$TMP" ] || die "dump is empty"
+
+# Validate by listing the archive table of contents. A truncated dump fails
+# here rather than silently at restore time, months later.
+if ! podman exec -i "$DB_CTR" pg_restore --list < "$TMP" > /dev/null 2>&1; then
+    die "dump failed validation (pg_restore --list); not keeping it"
+fi
+
+mv "$TMP" "$OUT"
+trap - EXIT
+chmod 0600 "$OUT"
+
+echo "backup.sh: wrote $OUT ($(du -h "$OUT" | cut -f1))"
+echo "backup.sh: $(podman exec -i "$DB_CTR" pg_restore --list < "$OUT" | grep -c '^[0-9]') objects"

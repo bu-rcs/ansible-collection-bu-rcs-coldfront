@@ -1,0 +1,201 @@
+---
+- name: Create Coldfront top level directories
+  ansible.builtin.file:
+    path: "{{ cf_dir }}/{{ item.dir }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - { dir: "" }
+    - { dir: "etc" }
+    - { dir: "static" }
+
+- name: Create Coldfront webserver top level directories
+  ansible.builtin.file:
+    path: "{{ cf_web_dir }}/{{ item.dir }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - { dir: "" }
+
+- name: Install site template overrides
+  ansible.builtin.copy:
+    src: site_templates/
+    dest: "{{ cf_dir }}/site-templates/"
+    owner: root
+    group: root
+    mode: '0644'
+    directory_mode: '0755'
+  notify:
+    - Restart Coldfront server
+    - Restart Coldfront worker
+
+- name: Create Coldfront instance network
+  containers.podman.podman_network:
+    name: "{{ cf_network }}"
+    state: present
+
+- name: Handle Coldfront Postgres password
+  ansible.builtin.include_tasks: secret.yml
+  vars:
+    cf_secret_var: cf_db_password
+
+- name: Handle cf key secret
+  ansible.builtin.include_tasks: secret.yml
+  vars:
+    cf_secret_var: cf_secret_key
+
+- name: Handle redis password
+  ansible.builtin.include_tasks: secret.yml
+  vars:
+    cf_secret_var: cf_redis_password
+
+- name: Create Postgres database for Coldfront
+  ansible.builtin.import_tasks: deploy_postgres.yml
+  when: cf_db_managed | bool
+
+- name: Create Redis server for Coldfront
+  ansible.builtin.import_tasks: deploy_redis.yml
+  when: cf_redis_managed | bool
+
+- name: Create Coldfront webserver container
+  containers.podman.podman_container:
+    name: "{{ cf_web_name }}"
+    image: "{{ cf_web_image }}"
+    network: "{{ cf_network }}"
+    publish: "{{ cf_web_bind_host }}:{{ cf_web_bind_port }}:80"
+    timezone: "{{ cf_timezone }}"
+    volumes:
+      - "{{ cf_dir }}/static:/usr/share/nginx/html:ro,z"
+    state: quadlet
+    quadlet_filename: "{{ cf_web_name }}"
+    quadlet_options:
+      - |
+        [Install]
+        WantedBy=default.target
+  notify: Restart Coldfront webserver
+
+- name: Install Coldfront config files
+  ansible.builtin.template:
+    src: "{{ item.file }}.j2"
+    dest: "{{ cf_dir }}/{{ item.file }}"
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0640') }}"
+  loop:
+    - { file: "etc/coldfront_settings.py" }
+    - { file: "etc/cf_remote_user.py" }
+    - { file: "coldfront.env" }
+  notify:
+    - Restart Coldfront server
+    - Restart Coldfront worker
+
+- name: Create Coldfront app container
+  containers.podman.podman_container:
+    name: "{{ cf_app_name }}"
+    image: "{{ cf_image }}"
+    network: "{{ cf_network }}"
+    publish: "{{ cf_bind_host }}:{{ cf_bind_port }}:8000"
+    timezone: "{{ cf_timezone }}"
+    env_file: "{{ cf_dir }}/coldfront.env"
+    secrets:
+      - "{{ cf_instance }}_cf_db_password,\
+         type=mount,target=/run/secrets/cf_db_password"
+      - "{{ cf_instance }}_cf_secret_key,\
+         type=mount,target=/run/secrets/cf_secret_key"
+      - "{{ cf_instance }}_cf_redis_password,\
+         type=mount,target=/run/secrets/cf_redis_password"
+    volumes:
+      - "{{ cf_dir }}/etc:/etc/coldfront:ro,z"
+      - "{{ cf_dir }}/static:/static:rw,z"
+      - "{{ cf_dir }}/site-templates:/etc/coldfront/site-templates:ro,z"
+    state: quadlet
+    quadlet_filename: "{{ cf_app_name }}"
+    quadlet_options:
+      - |
+        [Unit]
+        {% if cf_db_managed | bool %}
+        After={{ cf_db_name }}.service
+        Wants={{ cf_db_name }}.service
+        {% endif %}
+        {% if cf_redis_managed | bool %}
+        After={{ cf_redis_name }}.service
+        Wants={{ cf_redis_name }}.service
+        {% endif %}
+      - |
+        [Install]
+        WantedBy=default.target
+  notify: Restart Coldfront server
+
+- name: Create Coldfront worker container
+  containers.podman.podman_container:
+    name: "{{ cf_workers_name }}"
+    image: "{{ cf_image }}"
+    network: "{{ cf_network }}"
+    timezone: "{{ cf_timezone }}"
+    command: "coldfront qcluster"
+    env_file: "{{ cf_dir }}/coldfront.env"
+    secrets:
+      - "{{ cf_instance }}_cf_db_password,\
+         type=mount,target=/run/secrets/cf_db_password"
+      - "{{ cf_instance }}_cf_secret_key,\
+         type=mount,target=/run/secrets/cf_secret_key"
+      - "{{ cf_instance }}_cf_redis_password,\
+         type=mount,target=/run/secrets/cf_redis_password"
+    volumes:
+      - "{{ cf_dir }}/etc:/etc/coldfront:ro,z"
+    state: quadlet
+    quadlet_filename: "{{ cf_workers_name }}"
+    quadlet_options:
+      - |
+        [Unit]
+        {% if cf_db_managed | bool %}
+        After={{ cf_db_name }}.service
+        Wants={{ cf_db_name }}.service
+        {% endif %}
+        {% if cf_redis_managed | bool %}
+        After={{ cf_redis_name }}.service
+        Wants={{ cf_redis_name }}.service
+        {% endif %}
+      - |
+        [Install]
+        WantedBy=default.target
+  notify: Restart Coldfront worker
+
+- name: Enable Coldfront systemd services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+  loop:
+    - "{{ cf_web_name }}"
+    - "{{ cf_app_name }}"
+    - "{{ cf_workers_name }}"
+
+- name: Create Coldfront script and backup directories
+  ansible.builtin.file:
+    path: "{{ cf_dir }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+  loop:
+    - bin
+    - backups
+
+- name: Install Coldfront operator scripts
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ cf_dir }}/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: '0750'
+  loop:
+    - init.sh
+    - backup.sh
+    - restore.sh

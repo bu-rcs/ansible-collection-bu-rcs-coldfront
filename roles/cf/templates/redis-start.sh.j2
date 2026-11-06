@@ -1,0 +1,4 @@
+#!/bin/sh
+# Read the password at container start so it never lands in the quadlet,
+# the Ansible run, or the host filesystem.
+exec redis-server --requirepass "$(cat /run/secrets/cf_redis_password)"

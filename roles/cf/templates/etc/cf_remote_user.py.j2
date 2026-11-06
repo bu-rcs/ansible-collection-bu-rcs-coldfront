@@ -1,0 +1,113 @@
+# Managed by bu_rcs.coldfront -- do not edit.
+#
+# REMOTE_USER authentication for {{ cf_instance }}.
+#
+# Apache in front terminates TLS and runs mod_shib / mod_auth_openidc, then
+# passes the authenticated identity to this container as request headers.
+# ColdFront ships no REMOTE_USER support, so both halves live here.
+#
+# WHY A MODULE AND NOT coldfront_settings.py
+#   MIDDLEWARE and AUTHENTICATION_BACKENDS take dotted import paths, so the
+#   classes must live somewhere importable. coldfront_settings.py is exec'd,
+#   not imported, so classes defined there cannot be referenced by path.
+#
+# This module is always installed but only takes effect when
+# cf_remote_user_header is set: the settings template wires the middleware and
+# backend in only then. Unreferenced, nothing here is imported or executed.
+#
+# SECURITY
+#   Django trusts these headers absolutely. Apache MUST unset them on the way
+#   in before setting them, or a client can send its own and log in as anyone:
+#
+#     RequestHeader unset X-Remote-User
+#     RequestHeader set   X-Remote-User %{REMOTE_USER}s
+#
+#   The app port must also be unreachable except from Apache.
+
+import logging
+
+from django.contrib.auth.backends import RemoteUserBackend
+from django.contrib.auth.middleware import RemoteUserMiddleware
+
+logger = logging.getLogger(__name__)
+
+# Header names as Django sees them: uppercased, dashes to underscores, HTTP_
+# prefix added. Apache's "X-Remote-User" arrives as "HTTP_X_REMOTE_USER".
+USER_HEADER = "HTTP_{{ cf_remote_user_header | default('X-Remote-User', true) | upper | replace('-', '_') }}"
+EMAIL_HEADER = "HTTP_{{ cf_remote_email_header | default('X-Remote-Email', true) | upper | replace('-', '_') }}"
+FIRST_HEADER = "HTTP_{{ cf_remote_first_header | default('X-Remote-Givenname', true) | upper | replace('-', '_') }}"
+LAST_HEADER = "HTTP_{{ cf_remote_last_header | default('X-Remote-Sn', true) | upper | replace('-', '_') }}"
+
+# Strip the scope from a scoped identifier, so eppn "abaris@bu.edu" becomes
+# username "abaris". Keeps Django usernames matching POSIX/AD account names,
+# which matters for pre-created users and for any future Slurm integration.
+STRIP_SCOPE = {{ 'True' if cf_remote_user_strip_scope | default(true) | bool else 'False' }}
+
+
+class ShibRemoteUserMiddleware(RemoteUserMiddleware):
+    """Read the identity from a proxy header instead of REMOTE_USER."""
+
+    header = USER_HEADER
+
+    # True (the default) logs the user out as soon as the header disappears.
+    # Correct when Apache protects the whole application: a vanished header
+    # means the SP session ended. If only some paths are protected, an
+    # unprotected path would log the user out instead -- in that case protect
+    # everything rather than setting this False.
+    force_logout_if_no_header = True
+
+
+class ShibRemoteUserBackend(RemoteUserBackend):
+    """Create and populate users from proxy-supplied attributes."""
+
+    # Set False to require pre-created accounts and reject unknown users.
+    create_unknown_user = {{ 'True' if cf_remote_user_create | default(true) | bool else 'False' }}
+
+    def clean_username(self, username):
+        if STRIP_SCOPE and "@" in username:
+            username = username.split("@", 1)[0]
+        return username.strip().lower()
+
+    def configure_user(self, request, user, created=True):
+        """Populate names and email from headers.
+
+        Runs on every authentication, not just creation, so attribute changes
+        in the directory propagate. Only writes when a header is present and
+        differs, so pre-created or hand-edited values are not blanked out by
+        an Apache config that does not release that attribute.
+        """
+        # With create_unknown_user = False, Django calls this with user=None
+        # for an unrecognised identity. Return None so authentication fails
+        # cleanly; without this the caller gets AttributeError and a 500.
+        if user is None:
+            logger.warning(
+                "remote_user: rejected unknown identity %r (user creation disabled)",
+                request.META.get(USER_HEADER),
+            )
+            return None
+
+        changed = []
+        for field, header in (
+            ("email", EMAIL_HEADER),
+            ("first_name", FIRST_HEADER),
+            ("last_name", LAST_HEADER),
+        ):
+            value = (request.META.get(header) or "").strip()
+            if value and getattr(user, field) != value:
+                setattr(user, field, value)
+                changed.append(field)
+
+        if created:
+            # No local password: authentication happens in Apache only.
+            user.set_unusable_password()
+            changed.append("password")
+
+        if changed:
+            user.save()
+            logger.info(
+                "remote_user: %s user %s (%s)",
+                "created" if created else "updated",
+                user.username,
+                ", ".join(changed),
+            )
+        return user

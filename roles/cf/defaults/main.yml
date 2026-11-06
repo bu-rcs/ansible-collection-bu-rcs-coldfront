@@ -1,0 +1,95 @@
+cf_instance: 'rcs'
+cf_site_name: 'BU RCS'
+cf_prefix: '/srv'
+cf_app_name: "{{ cf_instance }}-cf-app"
+cf_workers_name: "{{ cf_instance }}-cf-workers"
+cf_dir: "{{ cf_prefix }}/{{ cf_app_name }}"
+cf_image: 'docker.io/ubccr/coldfront:latest'
+cf_bind_host: '0.0.0.0'
+cf_bind_port: '8000'
+cf_timezone: local
+cf_network: "{{ cf_instance }}-cf-net"
+cf_base_path: "coldfront-dev"
+cf_public_host: "cloud.bu.edu"
+cf_secret_key: ""
+cf_q_workers: 2
+cf_ldap_server_uri: ""
+cf_ldap_search_base: ""
+
+# Extra ColdFront settings, beyond those the role manages explicitly.
+#
+# PREFER cf_settings_extra. It is plain Python appended to
+# coldfront_settings.py, so it handles dicts, lists and anything computed, and
+# keeps the whole configuration readable in one file.
+#
+# cf_env_extra exists for the settings that MUST come from the environment:
+#
+#   PLUGIN_* flags        read while INSTALLED_APPS is assembled, before
+#                         local_settings loads: PLUGIN_SLURM, PLUGIN_IQUOTA,
+#                         PLUGIN_FREEIPA, PLUGIN_SYSMON, PLUGIN_XDMOD,
+#                         PLUGIN_AUTH_OIDC, PLUGIN_AUTH_LDAP,
+#                         PLUGIN_LDAP_USER_SEARCH, PLUGIN_API,
+#                         PLUGIN_AUTO_COMPUTE_ALLOCATION,
+#                         PLUGIN_PROJECT_OPENLDAP
+#   BASE_PATH             STATIC_URL is derived from it at import time, so a
+#                         later override leaves STATIC_URL stale
+#
+# Rule of thumb: if `grep -n SETTING_NAME coldfront/config/*.py` shows the
+# value interpolated into another setting, it has to be in the environment.
+# Otherwise the .py file works.
+#
+# Both render last in their file, so either can override anything the role set
+# above it -- including things it probably should not. Nothing validates that.
+
+# Plain Python, appended verbatim to coldfront_settings.py.
+#   cf_settings_extra: |
+#     PUBLICATION_ENABLE = False
+#     GRANT_ENABLE = False
+#     RESEARCH_OUTPUT_ENABLE = False
+#     ALLOCATION_DEFAULT_ALLOCATION_LENGTH = 180
+cf_settings_extra: ''
+
+# KEY=value lines appended to coldfront.env. Values render as written:
+# YAML true/false become True/False, which django-environ parses correctly.
+#   cf_env_extra:
+#     PLUGIN_API: true
+cf_env_extra: {}
+
+# Header Apache sets with the authenticated username. Empty disables
+# REMOTE_USER auth entirely and leaves ColdFront on local Django accounts.
+# cf_remote_user_header: ''
+cf_remote_user_header: X-Remote-User
+
+# Only meaningful when the above is set.
+cf_remote_email_header: X-Remote-Email
+cf_remote_first_header: X-Remote-Givenname
+cf_remote_last_header: X-Remote-Sn
+cf_remote_user_create: true          # false = pre-created accounts only
+cf_remote_user_strip_scope: true     # abaris@bu.edu -> abaris
+cf_remote_logout_url: '/Shibboleth.sso/Logout'
+
+# web server
+cf_web_name: "{{ cf_instance }}-cf-web"
+cf_web_image: docker.io/library/nginx:1.27-alpine
+cf_web_dir: "{{ cf_prefix }}/{{ cf_web_name }}"
+cf_web_bind_host: "{{ cf_bind_host }}"
+cf_web_bind_port: '80'
+
+# database
+cf_db_managed: true
+cf_db_image: 'docker.io/library/postgres:16'
+cf_db_name: "{{ cf_instance }}-cf-pgsql"
+cf_db_dir: "{{ cf_prefix }}/{{ cf_db_name }}"
+cf_db_host: "{{ cf_db_name }}"
+cf_db_dbname: "coldfront"
+cf_db_user: "{{ cf_instance }}"
+cf_db_password: ""
+
+# redis
+cf_redis_managed: true
+cf_redis_name: "{{ cf_instance }}-cf-redis"
+cf_redis_dir: "{{ cf_prefix }}/{{ cf_redis_name }}"
+cf_redis_image: docker.io/library/redis:7
+cf_redis_host: "{{ cf_redis_name }}"
+cf_redis_port: '6379'
+cf_redis_password: ""
